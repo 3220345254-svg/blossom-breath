@@ -6,6 +6,8 @@
 
 **[打开花息 →](https://3220345254-svg.github.io/blossom-breath/)**
 
+<img src="screenshots/qr.png" width="180" alt="扫码打开花息" />
+
 手机、平板、电脑都可以直接打开，无需安装任何东西；首次打开允许摄像头即可。在线版使用 HTTPS，手机浏览器也能正常请求摄像头。
 
 > 如果所在网络访问 GitHub Pages 不稳定，可以用下面的本地方式打开。

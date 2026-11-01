@@ -82,6 +82,11 @@ export class HandTracker {
     this.video = video;
     this.canvas = previewCanvas;
     this.ctx = previewCanvas.getContext('2d');
+    // MediaPipe's CPU graph is unreliable with full-resolution phone frames
+    // (1280x720 / 1920x1080). Downscale every detection frame to a predictable
+    // size; 640 px is plenty for one hand and much faster on mobile.
+    this.detectCanvas = document.createElement('canvas');
+    this.detectCtx = this.detectCanvas.getContext('2d', { alpha: false });
     this.callbacks = callbacks;
 
     this.stream = null;
@@ -328,8 +333,24 @@ export class HandTracker {
     this.raf = requestAnimationFrame(this.loop);
   }
 
+  prepareDetectFrame() {
+    const video = this.video;
+    const vw = video.videoWidth || 640;
+    const vh = video.videoHeight || 480;
+    const maxSide = isMobileDevice ? 640 : 960;
+    const scale = Math.min(1, maxSide / Math.max(vw, vh));
+    const width = Math.max(2, Math.round(vw * scale));
+    const height = Math.max(2, Math.round(vh * scale));
+    if (this.detectCanvas.width !== width || this.detectCanvas.height !== height) {
+      this.detectCanvas.width = width;
+      this.detectCanvas.height = height;
+    }
+    this.detectCtx.drawImage(video, 0, 0, width, height);
+    return this.detectCanvas;
+  }
+
   detect(now) {
-    const result = this.landmarker.detectForVideo(this.video, now);
+    const result = this.landmarker.detectForVideo(this.prepareDetectFrame(), now);
     this.lastResult = result;
     const hasHand = result && result.landmarks && result.landmarks.length > 0;
 

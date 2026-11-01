@@ -1,8 +1,8 @@
 /* 花息 — interaction choreography. */
 
-import { createFlowerGeometry } from './particles.js?v=20261101d';
-import { FlowerRenderer } from './renderer.js?v=20261101d';
-import { HandTracker } from './hand.js?v=20261101d';
+import { createFlowerGeometry } from './particles.js?v=20261101e';
+import { FlowerRenderer } from './renderer.js?v=20261101e';
+import { HandTracker } from './hand.js?v=20261101e';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -204,7 +204,7 @@ async function startTracking() {
     state.cameraRunning = true;
     state.cameraStarting = false;
     setCameraUI('ready', '等待手部');
-    dom.hintText.innerHTML = '将手举到镜头前<br><em>花息会随指尖呼吸</em>';
+    dom.hintText.innerHTML = '将手掌放进画面<br><em>距离 40–80cm，光线充足</em>';
     dom.hint.classList.remove('is-hidden');
   } catch (error) {
     console.error('[花息] camera start failed', error);

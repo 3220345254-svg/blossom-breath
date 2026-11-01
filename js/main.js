@@ -1,8 +1,8 @@
 /* 花息 — interaction choreography. */
 
-import { createFlowerGeometry } from './particles.js?v=20261101c';
-import { FlowerRenderer } from './renderer.js?v=20261101c';
-import { HandTracker } from './hand.js?v=20261101c';
+import { createFlowerGeometry } from './particles.js?v=20261101d';
+import { FlowerRenderer } from './renderer.js?v=20261101d';
+import { HandTracker } from './hand.js?v=20261101d';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));

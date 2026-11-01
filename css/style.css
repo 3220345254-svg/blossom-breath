@@ -1295,7 +1295,7 @@ a {
   }
 
   .camera-module {
-    width: 136px;
+    width: 148px;
   }
 
   .camera-shell {
@@ -1324,7 +1324,7 @@ a {
   }
 
   .camera-empty strong {
-    font-size: 8px;
+    font-size: 9px;
   }
 
   .camera-empty p {
@@ -1332,9 +1332,11 @@ a {
   }
 
   .ghost-button {
-    margin-top: 5px;
-    padding: 4px 9px;
-    font-size: 6.5px;
+    min-height: 36px;
+    margin-top: 7px;
+    padding: 8px 16px;
+    font-size: 9px;
+    letter-spacing: 0.14em;
   }
 
   .camera-meta,

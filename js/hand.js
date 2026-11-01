@@ -21,6 +21,20 @@ function smoothstep(a, b, v) {
   return t * t * (3 - 2 * t);
 }
 
+function timeoutError(code) {
+  const error = new Error(code);
+  error.name = 'TimeoutError';
+  return error;
+}
+
+function withTimeout(promise, ms, code) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(timeoutError(code)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 function handOpenness(worldLandmarks, landmarks) {
   const points = worldLandmarks && worldLandmarks.length ? worldLandmarks : landmarks;
   if (!points || points.length < 21) return 0;
@@ -67,6 +81,7 @@ export class HandTracker {
     this.stream = null;
     this.landmarker = null;
     this.modelPromise = null;
+    this.startSeq = 0;
     this.running = false;
     this.active = false;
     this.lastVideoTime = -1;
@@ -90,73 +105,128 @@ export class HandTracker {
 
   async loadModel() {
     if (this.landmarker) return this.landmarker;
-    if (this.modelPromise) return this.modelPromise;
-
-    this.modelPromise = (async () => {
-      this.onStatus({ state: 'loading', message: '正在加载手部模型' });
-      const assetBase = new URL('vendor/mediapipe/', document.baseURI);
-      const fileset = await FilesetResolver.forVisionTasks(new URL('wasm', assetBase).href);
-      const options = {
-        runningMode: 'VIDEO',
-        numHands: 1,
-        minHandDetectionConfidence: 0.38,
-        minHandPresenceConfidence: 0.42,
-        minTrackingConfidence: 0.38,
-        baseOptions: {
-          modelAssetPath: new URL('hand_landmarker.task', assetBase).href,
-          delegate: 'GPU',
-        },
-      };
-      try {
-        this.landmarker = await HandLandmarker.createFromOptions(fileset, options);
-      } catch (error) {
-        console.warn('[花息] GPU delegate unavailable, retrying with CPU.', error);
-        options.baseOptions.delegate = 'CPU';
-        this.landmarker = await HandLandmarker.createFromOptions(fileset, options);
-      }
-      this.onStatus({ state: 'ready', message: '等待手部入镜' });
-      return this.landmarker;
-    })().catch((error) => {
-      this.modelPromise = null;
-      this.onStatus({ state: 'error', message: '手部模型加载失败' });
-      throw error;
-    });
-
-    return this.modelPromise;
+    if (!this.modelPromise) {
+      this.modelPromise = this.createLandmarker().catch((error) => {
+        this.modelPromise = null;
+        this.onStatus({ state: 'error', message: '手部模型加载失败' });
+        throw error;
+      });
+    }
+    // The model is allowed to keep loading after a timeout: the next retry can
+    // reuse it. The timeout only releases the UI from a spinner that may never
+    // finish on restricted in-app browsers.
+    return withTimeout(this.modelPromise, 24000, 'MODEL_TIMEOUT');
   }
 
-  async openCamera() {
+  async createLandmarker() {
+    this.onStatus({ state: 'loading', message: '正在加载手部模型' });
+    const assetBase = new URL('vendor/mediapipe/', document.baseURI);
+    const fileset = await withTimeout(
+      FilesetResolver.forVisionTasks(new URL('wasm', assetBase).href),
+      10000,
+      'MODEL_LOAD_TIMEOUT'
+    );
+    const options = {
+      runningMode: 'VIDEO',
+      numHands: 1,
+      minHandDetectionConfidence: 0.38,
+      minHandPresenceConfidence: 0.42,
+      minTrackingConfidence: 0.38,
+      baseOptions: {
+        modelAssetPath: new URL('hand_landmarker.task', assetBase).href,
+        delegate: 'GPU',
+      },
+    };
+    try {
+      this.landmarker = await withTimeout(
+        HandLandmarker.createFromOptions(fileset, options),
+        10000,
+        'MODEL_LOAD_TIMEOUT'
+      );
+    } catch (error) {
+      console.warn('[花息] GPU delegate unavailable, retrying with CPU.', error);
+      options.baseOptions.delegate = 'CPU';
+      this.landmarker = await withTimeout(
+        HandLandmarker.createFromOptions(fileset, options),
+        12000,
+        'MODEL_LOAD_TIMEOUT'
+      );
+    }
+    return this.landmarker;
+  }
+
+  releaseStream() {
+    if (this.stream) {
+      for (const track of this.stream.getTracks()) track.stop();
+      this.stream = null;
+    }
+    if (this.video) this.video.srcObject = null;
+  }
+
+  async openCamera(seq) {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('CAMERA_UNSUPPORTED');
     }
-    this.onStatus({ state: 'loading', message: '正在打开镜头' });
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: 'user',
-        width: { ideal: 960 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30, max: 30 },
-      },
-    });
+    this.onStatus({ state: 'loading', message: '正在请求摄像头权限' });
+
+    let stream;
+    try {
+      stream = await withTimeout(
+        navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: 'user',
+            width: { ideal: 960 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, max: 30 },
+          },
+        }),
+        9000,
+        'CAMERA_TIMEOUT'
+      );
+    } catch (error) {
+      if (error && error.name === 'TimeoutError') {
+        // The permission prompt can stay invisible inside in-app browsers.
+        throw new Error('CAMERA_TIMEOUT');
+      }
+      throw error;
+    }
+
+    if (seq !== this.startSeq || !this.running) {
+      for (const track of stream.getTracks()) track.stop();
+      throw new Error('START_CANCELLED');
+    }
+
     this.stream = stream;
     this.video.srcObject = stream;
     this.video.muted = true;
     this.video.playsInline = true;
-    await this.video.play();
+    this.video.setAttribute('playsinline', '');
+    this.video.setAttribute('webkit-playsinline', '');
 
-    if (this.video.readyState < 2) {
-      await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('CAMERA_TIMEOUT')), 5000);
-        this.video.addEventListener(
-          'loadeddata',
-          () => {
-            clearTimeout(timer);
-            resolve();
-          },
-          { once: true }
+    try {
+      await withTimeout(this.video.play(), 5000, 'CAMERA_TIMEOUT');
+      if (this.video.readyState < 2) {
+        await withTimeout(
+          new Promise((resolve) => {
+            if (this.video.readyState >= 2) {
+              resolve();
+              return;
+            }
+            this.video.addEventListener('loadeddata', resolve, { once: true });
+          }),
+          5000,
+          'CAMERA_TIMEOUT'
         );
-      });
+      }
+    } catch (error) {
+      this.releaseStream();
+      throw error;
+    }
+
+    if (seq !== this.startSeq || !this.running) {
+      this.releaseStream();
+      throw new Error('START_CANCELLED');
     }
     this.active = true;
   }
@@ -164,34 +234,37 @@ export class HandTracker {
   async start() {
     if (this.running) return;
     this.running = true;
+    const seq = ++this.startSeq;
     try {
-      const [model] = await Promise.all([this.loadModel(), this.openCamera()]);
+      const [model] = await withTimeout(
+        Promise.all([this.loadModel(), this.openCamera(seq)]),
+        26000,
+        'START_TIMEOUT'
+      );
       if (!model) throw new Error('MODEL_UNAVAILABLE');
+      if (seq !== this.startSeq || !this.running) {
+        this.releaseStream();
+        return;
+      }
       this.onStatus({ state: 'ready', message: '等待手部入镜' });
       cancelAnimationFrame(this.raf);
       this.raf = requestAnimationFrame(this.loop);
     } catch (error) {
+      if (seq !== this.startSeq) return;
       this.running = false;
       this.active = false;
-      if (this.stream) {
-        for (const track of this.stream.getTracks()) track.stop();
-        this.stream = null;
-      }
-      this.video.srcObject = null;
+      this.releaseStream();
       throw error;
     }
   }
 
   stopCamera() {
+    this.startSeq += 1;
     this.active = false;
     this.running = false;
     cancelAnimationFrame(this.raf);
     this.raf = null;
-    if (this.stream) {
-      for (const track of this.stream.getTracks()) track.stop();
-      this.stream = null;
-    }
-    this.video.srcObject = null;
+    this.releaseStream();
     this.lastResult = null;
     this.lastHandAt = 0;
     this.missingSince = 0;

@@ -16,6 +16,10 @@ const smoothstep = (a, b, v) => {
 const params = new URLSearchParams(window.location.search);
 const startCamera = !params.has('demo') && !params.has('nocam');
 const initialOpen = clamp(parseFloat(params.get('open') || '0.18'), 0, 1);
+const userAgent = navigator.userAgent || '';
+const isWeChat = /MicroMessenger|wxwork/i.test(userAgent);
+const forceCamera = params.get('camera') === '1';
+const wechatMode = isWeChat && !forceCamera;
 
 const dom = {
   canvas: $('#gl'),
@@ -43,6 +47,9 @@ const dom = {
   signalText: $('#signalText'),
   handPulse: $('#handPulse'),
   cameraMeta: $('#cameraMeta'),
+  wechatTip: $('#wechatTip'),
+  wechatCopy: $('#wechatCopy'),
+  wechatClose: $('#wechatClose'),
 };
 
 const ui = {
@@ -119,8 +126,13 @@ function setCameraUI(nextState, message = '') {
   dom.cameraToggle.disabled = nextState === 'loading';
 
   const isOff = nextState === 'off' || nextState === 'error';
-  dom.cameraEmpty.classList.toggle('is-visible', isOff);
-  if (isOff) {
+  const isBusy = nextState === 'loading';
+  dom.cameraEmpty.classList.toggle('is-visible', isOff || isBusy);
+  dom.cameraAction.hidden = isBusy;
+  if (isBusy) {
+    dom.cameraEmptyTitle.textContent = message || '正在连接镜头';
+    dom.cameraEmptyText.textContent = '首次加载需要几秒，请保持页面在前台。';
+  } else if (isOff) {
     dom.cameraEmptyTitle.textContent = message || '摄像头未开启';
     dom.cameraEmptyText.textContent =
       nextState === 'error'
@@ -142,11 +154,19 @@ function mapCameraError(error) {
   if (name === 'NotReadableError' || name === 'TrackStartError') return '摄像头被占用';
   if (error && error.message === 'CAMERA_UNSUPPORTED') return '浏览器不支持摄像头';
   if (error && error.message === 'CAMERA_TIMEOUT') return '摄像头启动超时';
+  if (error && (error.message === 'MODEL_TIMEOUT' || error.message === 'MODEL_LOAD_TIMEOUT')) {
+    return '识别模型加载超时';
+  }
+  if (error && error.message === 'START_TIMEOUT') return '镜头启动超时';
   if (error && /model/i.test(error.message || '')) return '识别模型加载失败';
   return '镜头启动失败';
 }
 
 async function startTracking() {
+  if (wechatMode) {
+    showToast('微信内不能调用摄像头 · 点右上角 ··· 在浏览器打开');
+    return;
+  }
   if (state.cameraStarting) return;
   if (!tracker) {
     ensureTracker();
@@ -432,7 +452,7 @@ function setupPointerFallback() {
   };
 
   window.addEventListener('pointerdown', (event) => {
-    if (event.target.closest('button, a')) return;
+    if (event.target instanceof Element && event.target.closest('button, a, .wechat-tip')) return;
     press();
   });
   window.addEventListener('pointerup', release);
@@ -466,16 +486,74 @@ function setupPointerFallback() {
   });
 }
 
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.left = '-9999px';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  const copied = document.execCommand('copy');
+  area.remove();
+  if (!copied) throw new Error('COPY_FAILED');
+}
+
+function setupWeChatUI() {
+  if (!dom.wechatTip) return;
+  const dismiss = () => {
+    dom.wechatTip.hidden = true;
+  };
+  if (dom.wechatClose) dom.wechatClose.addEventListener('click', dismiss);
+  if (dom.wechatCopy) {
+    dom.wechatCopy.addEventListener('click', async () => {
+      try {
+        await copyText(window.location.href);
+        showToast('网址已复制 · 粘贴到手机浏览器打开', 3200);
+      } catch (error) {
+        showToast('请点右上角 ··· → 复制链接，再粘贴到浏览器', 3600);
+      }
+    });
+  }
+}
+
+function enterWeChatMode() {
+  state.cameraRunning = false;
+  state.cameraStarting = false;
+  setCameraUI('off', '触控模式');
+  dom.cameraShell.style.display = 'none';
+  dom.cameraMeta.style.display = 'none';
+  dom.handPulse.style.display = 'none';
+  dom.hint.classList.remove('is-hidden');
+  dom.hintText.innerHTML = '触控模式<br><em>按住画面 · 花苞收拢，松开则绽放</em>';
+
+  dom.wechatTip.hidden = false;
+}
+
 function setupCameraUI() {
   dom.cameraToggle.addEventListener('click', () => {
+    if (wechatMode) {
+      showToast('微信内不能调用摄像头 · 点右上角 ··· 在浏览器打开');
+      return;
+    }
     if (state.cameraRunning) stopTracking();
     else startTracking();
   });
   dom.cameraAction.addEventListener('click', () => {
+    if (wechatMode) {
+      showToast('微信内不能调用摄像头 · 点右上角 ··· 在浏览器打开');
+      return;
+    }
     startTracking();
   });
   dom.cameraShell.addEventListener('click', (event) => {
     if (event.target.closest('button')) return;
+    if (wechatMode) return;
     if (ui.state === 'off' || ui.state === 'error') startTracking();
   });
 }
@@ -520,6 +598,7 @@ function setupDebug() {
         cameraRunning: state.cameraRunning,
         cameraState: ui.state,
         handOpen: state.handOpen,
+        wechatMode,
       };
     },
   };
@@ -537,10 +616,16 @@ async function boot() {
     setupDebug();
     setupPointerFallback();
     setupCameraUI();
+    setupWeChatUI();
     setCameraUI('off', '镜头未开启');
     requestAnimationFrame(animate);
 
-    if (startCamera) {
+    if (wechatMode) {
+      // WeChat's in-app webview can leave getUserMedia pending forever. Do not
+      // start a request that can never finish; make the touch version the
+      // first-class experience and point to the external browser.
+      enterWeChatMode();
+    } else if (startCamera) {
       setTimeout(() => startTracking(), 650);
     } else {
       dom.hintText.innerHTML = '演示模式<br><em>移动鼠标 · 按住画面模拟握拳</em>';

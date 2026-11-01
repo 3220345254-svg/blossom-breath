@@ -1,8 +1,8 @@
 /* 花息 — interaction choreography. */
 
-import { createFlowerGeometry } from './particles.js';
-import { FlowerRenderer } from './renderer.js';
-import { HandTracker } from './hand.js';
+import { createFlowerGeometry } from './particles.js?v=20261101c';
+import { FlowerRenderer } from './renderer.js?v=20261101c';
+import { HandTracker } from './hand.js?v=20261101c';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -20,6 +20,10 @@ const userAgent = navigator.userAgent || '';
 const isWeChat = /MicroMessenger|wxwork/i.test(userAgent);
 const forceCamera = params.get('camera') === '1';
 const wechatMode = isWeChat && !forceCamera;
+const needsCameraGesture =
+  /Android|iPhone|iPad|iPod|Mobile/i.test(userAgent) ||
+  (navigator.maxTouchPoints > 1 && Math.min(window.innerWidth, window.innerHeight) < 900) ||
+  window.matchMedia('(pointer: coarse)').matches;
 
 const dom = {
   canvas: $('#gl'),
@@ -116,6 +120,7 @@ function setCameraUI(nextState, message = '') {
 
   const labels = {
     loading: '镜头连接中',
+    preview: '模型加载中',
     ready: '等待手部',
     tracking: '手部已捕捉',
     off: '镜头已关闭',
@@ -162,6 +167,22 @@ function mapCameraError(error) {
   return '镜头启动失败';
 }
 
+function cameraHelp(message) {
+  if (!window.isSecureContext) return '当前地址不是 HTTPS · 手机浏览器会阻止摄像头';
+  const isIOS = /iPhone|iPad|iPod/i.test(userAgent);
+  if (/权限|拒绝/.test(message)) {
+    return isIOS
+      ? 'iPhone：设置 → Safari 浏览器 → 相机 → 允许，再点“再次尝试”'
+      : '点地址栏的锁形图标 → 权限 → 相机 → 允许，再点“再次尝试”';
+  }
+  if (/模型/.test(message)) return '摄像头已开启，但识别模型加载失败 · 可刷新重试，或按住画面玩';
+  if (/超时/.test(message)) return '摄像头启动超时 · 检查系统相机权限后再点“再次尝试”';
+  if (/占用/.test(message)) return '摄像头被其他应用占用 · 关闭其他相机应用后再试';
+  if (/不支持/.test(message)) return '这个浏览器不支持网页摄像头 · 请用 Safari / Chrome 打开';
+  if (/未找到/.test(message)) return '没有检测到摄像头 · 可以按住画面直接玩';
+  return '镜头未连接 · 可以按住画面直接玩';
+}
+
 async function startTracking() {
   if (wechatMode) {
     showToast('微信内不能调用摄像头 · 点右上角 ··· 在浏览器打开');
@@ -175,9 +196,15 @@ async function startTracking() {
   setCameraUI('loading', '正在唤醒镜头');
   try {
     await tracker.start();
+    if (!tracker.running) {
+      state.cameraRunning = false;
+      state.cameraStarting = false;
+      return;
+    }
     state.cameraRunning = true;
     state.cameraStarting = false;
     setCameraUI('ready', '等待手部');
+    dom.hintText.innerHTML = '将手举到镜头前<br><em>花息会随指尖呼吸</em>';
     dom.hint.classList.remove('is-hidden');
   } catch (error) {
     console.error('[花息] camera start failed', error);
@@ -185,7 +212,7 @@ async function startTracking() {
     state.cameraRunning = false;
     const message = mapCameraError(error);
     setCameraUI('error', message);
-    showToast(message === '摄像头权限被拒绝' ? '没有镜头也能玩：按住画面模拟握拳' : `${message} · 可用鼠标体验`);
+    showToast(cameraHelp(message), 5200);
     dom.hintText.innerHTML = '摄像头未连接<br><em>按住画面 · 模拟握拳，松开则绽放</em>';
     dom.hint.classList.remove('is-hidden');
   }
@@ -226,7 +253,12 @@ function ensureTracker() {
     onStatus: (status) => {
       if (!status) return;
       if (status.state === 'loading') setCameraUI('loading', status.message);
-      else if (status.state === 'ready') {
+      else if (status.state === 'camera') {
+        state.cameraRunning = true;
+        setCameraUI('preview', status.message);
+        dom.hintText.innerHTML = '镜头已开启<br><em>正在加载手部识别…</em>';
+        dom.hint.classList.remove('is-hidden');
+      } else if (status.state === 'ready') {
         if (state.cameraRunning) setCameraUI('ready', status.message);
       } else if (status.state === 'tracking') {
         setCameraUI('tracking', status.message);
@@ -389,6 +421,8 @@ function updateUI(now) {
     signal = 'MOUSE FALLBACK · HOLD TO CLOSE';
   } else if (ui.state === 'loading') {
     signal = 'CALIBRATING HAND LANDMARKER';
+  } else if (ui.state === 'preview') {
+    signal = 'CAMERA ON · LOADING HAND MODEL';
   }
   if (signal !== ui.lastSignal) {
     dom.signalText.textContent = signal;
@@ -625,6 +659,12 @@ async function boot() {
       // start a request that can never finish; make the touch version the
       // first-class experience and point to the external browser.
       enterWeChatMode();
+    } else if (startCamera && needsCameraGesture) {
+      // iOS Safari requires a user gesture before it will grant camera access.
+      // Leaving the camera closed until the user taps also avoids a failed
+      // automatic prompt on Android and in-app browsers.
+      setCameraUI('off', '点按开启镜头');
+      dom.hintText.innerHTML = '点右上角「开启镜头」<br><em>也可以按住画面直接玩</em>';
     } else if (startCamera) {
       setTimeout(() => startTracking(), 650);
     } else {

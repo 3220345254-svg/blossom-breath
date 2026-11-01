@@ -16,6 +16,12 @@ const CONNECTIONS = [
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 
+const ua = navigator.userAgent || '';
+// iPadOS reports a desktop UA, so touch points are part of the check too.
+const isMobileDevice =
+  /Android|iPhone|iPad|iPod|Mobile/i.test(ua) ||
+  (navigator.maxTouchPoints > 1 && Math.min(window.innerWidth, window.innerHeight) < 900);
+
 function smoothstep(a, b, v) {
   const t = clamp((v - a) / (b - a), 0, 1);
   return t * t * (3 - 2 * t);
@@ -86,6 +92,9 @@ export class HandTracker {
     this.active = false;
     this.lastVideoTime = -1;
     this.lastDetectAt = 0;
+    // CPU inference on a phone needs a little more breathing room than a
+    // desktop GPU; 22 fps still feels continuous for the flower.
+    this.detectInterval = isMobileDevice ? 45 : 22;
     this.frameTimes = [];
     this.lastResult = null;
     this.lastHandAt = 0;
@@ -115,7 +124,7 @@ export class HandTracker {
     // The model is allowed to keep loading after a timeout: the next retry can
     // reuse it. The timeout only releases the UI from a spinner that may never
     // finish on restricted in-app browsers.
-    return withTimeout(this.modelPromise, 24000, 'MODEL_TIMEOUT');
+    return withTimeout(this.modelPromise, 30000, 'MODEL_TIMEOUT');
   }
 
   async createLandmarker() {
@@ -137,21 +146,26 @@ export class HandTracker {
         delegate: 'GPU',
       },
     };
-    try {
-      this.landmarker = await withTimeout(
-        HandLandmarker.createFromOptions(fileset, options),
-        10000,
-        'MODEL_LOAD_TIMEOUT'
-      );
-    } catch (error) {
-      console.warn('[花息] GPU delegate unavailable, retrying with CPU.', error);
-      options.baseOptions.delegate = 'CPU';
-      this.landmarker = await withTimeout(
-        HandLandmarker.createFromOptions(fileset, options),
-        12000,
-        'MODEL_LOAD_TIMEOUT'
-      );
+
+    // Mobile GPUs (especially in iOS WebViews) often fail halfway through
+    // MediaPipe's GPU setup. CPU is slower but much more dependable there.
+    const delegates = isMobileDevice ? ['CPU', 'GPU'] : ['GPU', 'CPU'];
+    let lastError = null;
+    for (const delegate of delegates) {
+      options.baseOptions.delegate = delegate;
+      try {
+        this.landmarker = await withTimeout(
+          HandLandmarker.createFromOptions(fileset, options),
+          delegate === 'GPU' ? 10000 : 14000,
+          'MODEL_LOAD_TIMEOUT'
+        );
+        break;
+      } catch (error) {
+        lastError = error;
+        console.warn(`[花息] ${delegate} delegate unavailable, trying the other one.`, error);
+      }
     }
+    if (!this.landmarker) throw lastError || new Error('MODEL_UNAVAILABLE');
     return this.landmarker;
   }
 
@@ -169,27 +183,38 @@ export class HandTracker {
     }
     this.onStatus({ state: 'loading', message: '正在请求摄像头权限' });
 
-    let stream;
-    try {
-      stream = await withTimeout(
-        navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: 'user',
-            width: { ideal: 960 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30, max: 30 },
-          },
-        }),
+    const openStream = (video) =>
+      withTimeout(
+        navigator.mediaDevices.getUserMedia({ audio: false, video }),
         9000,
         'CAMERA_TIMEOUT'
       );
+
+    let stream;
+    try {
+      stream = await openStream({
+        facingMode: 'user',
+        width: { ideal: isMobileDevice ? 640 : 960 },
+        height: { ideal: isMobileDevice ? 480 : 720 },
+        frameRate: { ideal: isMobileDevice ? 24 : 30 },
+      });
     } catch (error) {
       if (error && error.name === 'TimeoutError') {
         // The permission prompt can stay invisible inside in-app browsers.
         throw new Error('CAMERA_TIMEOUT');
       }
-      throw error;
+      if (error && (error.name === 'OverconstrainedError' || error.name === 'TypeError')) {
+        // Some Android cameras reject resolution/frame-rate combinations even
+        // when they are marked "ideal". Ask for the simplest possible stream.
+        try {
+          stream = await openStream({ facingMode: 'user' });
+        } catch (retryError) {
+          if (retryError && retryError.name === 'TimeoutError') throw new Error('CAMERA_TIMEOUT');
+          throw retryError;
+        }
+      } else {
+        throw error;
+      }
     }
 
     if (seq !== this.startSeq || !this.running) {
@@ -229,6 +254,10 @@ export class HandTracker {
       throw new Error('START_CANCELLED');
     }
     this.active = true;
+    // Show the live preview immediately. The model can still take a few
+    // seconds on a phone, and covering the camera with a spinner makes it
+    // look as if the camera itself never opened.
+    this.onStatus({ state: 'camera', message: '摄像头已开启 · 正在加载识别模型' });
   }
 
   async start() {
@@ -236,9 +265,11 @@ export class HandTracker {
     this.running = true;
     const seq = ++this.startSeq;
     try {
-      const [model] = await withTimeout(
-        Promise.all([this.loadModel(), this.openCamera(seq)]),
-        26000,
+      // Call getUserMedia first, directly in the tap/keyboard call stack.
+      // iOS Safari is strict about requiring a user gesture for the camera.
+      const [, model] = await withTimeout(
+        Promise.all([this.openCamera(seq), this.loadModel()]),
+        32000,
         'START_TIMEOUT'
       );
       if (!model) throw new Error('MODEL_UNAVAILABLE');
@@ -283,7 +314,7 @@ export class HandTracker {
     if (!this.running) return;
     if (this.video.readyState >= 2 && this.video.currentTime !== this.lastVideoTime) {
       this.lastVideoTime = this.video.currentTime;
-      if (now - this.lastDetectAt > 22) {
+      if (now - this.lastDetectAt > this.detectInterval) {
         this.lastDetectAt = now;
         try {
           this.detect(now);
